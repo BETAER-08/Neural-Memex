@@ -28,7 +28,7 @@ class AsyncIndexer:
             logger.info("Model loaded.")
 
     async def start(self):
-        """Starts the consumer loop with batch processing."""
+        """Starts the consumer loop with optimized batch processing."""
         self._running = True
         logger.info("AsyncIndexer started with batch processing.")
         
@@ -36,39 +36,40 @@ class AsyncIndexer:
         
         while self._running:
             try:
-                # Wait for items with a timeout to flush buffer if it doesn't fill up
+                # 버퍼가 있으면 Debounce 시간만큼 대기, 없으면 무한 대기
+                timeout = settings.DEBOUNCE_SECONDS if buffer else None
+                
                 try:
-                    # If buffer is empty, wait indefinitely for the first item
-                    # If buffer has items, wait specifically for debounce/timeout
-                    timeout = None if not buffer else settings.DEBOUNCE_SECONDS
-                    
+                    # 1. 큐에서 아이템 가져오기
                     file_path = await asyncio.wait_for(self.queue.get(), timeout=timeout)
                     buffer.append(file_path)
                     self.queue.task_done()
                 except asyncio.TimeoutError:
-                    # Timeout reached, flush buffer if we have items
-                    pass
-                
-                # Check conditions to process batch
-                if len(buffer) >= settings.BATCH_SIZE or (not self.queue.empty() and len(buffer) > 0) or (buffer and not self.queue.qsize()):
-                     # Simple logic: If we have items and (hit batch size OR timed out), process.
-                     # The wait_for handles the timeout case.
-                     if buffer:
-                         await self._process_batch(list(buffer)) # Pass a copy
-                         buffer.clear()
+                    # 2. 타임아웃(Debounce) 발생 시: 버퍼에 내용이 있으면 처리
+                    if buffer:
+                        # 중복 제거 (set) 후 처리
+                        await self._process_batch(list(set(buffer)))
+                        buffer.clear()
+                    continue
+
+                # 3. 버퍼가 꽉 찼으면 즉시 처리
+                if len(buffer) >= settings.BATCH_SIZE:
+                    await self._process_batch(list(set(buffer)))
+                    buffer.clear()
                          
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in indexer loop: {e}")
         
-        # Process remaining items on stop
+        # 종료 시 남은 잔여물 처리
         if buffer:
-            await self._process_batch(buffer)
+            await self._process_batch(list(set(buffer)))
 
     async def stop(self):
         """Stops the consumer loop."""
         self._running = False
+        # Queue 해제를 위해 더미 데이터를 넣거나 task cancel 필요할 수 있음
 
     async def enqueue_file(self, file_path: Path):
         """Adds a file path to the processing queue."""
@@ -81,10 +82,12 @@ class AsyncIndexer:
                 reader = PdfReader(str(file_path))
                 text = ""
                 for page in reader.pages:
-                    text += page.extract_text() + "\n"
+                    # extract_text()가 None을 반환하는 경우 방지
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
                 return text
             else:
-                # Default text handling
                 return file_path.read_text(encoding="utf-8", errors="ignore")
         except Exception as e:
             logger.warning(f"Could not extract text from {file_path}: {e}")
@@ -102,10 +105,9 @@ class AsyncIndexer:
         ids = []
         documents = []
         metadatas = []
-        valid_indices = [] # To keep track of which files we actually processed successfully
 
         # 1. Extraction Phase
-        for i, file_path in enumerate(file_paths):
+        for file_path in file_paths:
             if not file_path.exists():
                 logger.info(f"File deleted: {file_path}, removing from DB.") 
                 self._remove_from_db(file_path)
@@ -124,14 +126,14 @@ class AsyncIndexer:
                 "extension": file_path.suffix,
                 "size": file_path.stat().st_size
             })
-            valid_indices.append(i)
 
         if not ids:
             return
 
         # 2. Embedding Phase (Batch)
         try:
-            logger.info(f"Embedding batch of {len(ids)} files...")
+            logger.info(f"Embedding batch of {len(ids)} unique files...")
+            # run_in_executor로 CPU Blocking 방지
             embeddings = await loop.run_in_executor(None, self.model.encode, documents)
             
             # 3. Upsert Phase
