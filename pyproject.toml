@@ -13,6 +13,7 @@ dependencies = [
     "sentence-transformers",
     "pydantic-settings",
     "asyncio",
+    "pypdf",
 ]
 requires-python = ">=3.10"
 

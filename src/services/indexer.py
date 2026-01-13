@@ -1,9 +1,9 @@
 import asyncio
-import hashlib
 import logging
 from pathlib import Path
 from typing import List, Optional
 
+from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 from chromadb.api.models.Collection import Collection
 
@@ -28,72 +28,123 @@ class AsyncIndexer:
             logger.info("Model loaded.")
 
     async def start(self):
-        """Starts the consumer loop."""
+        """Starts the consumer loop with batch processing."""
         self._running = True
-        logger.info("AsyncIndexer started.")
+        logger.info("AsyncIndexer started with batch processing.")
+        
+        buffer: List[Path] = []
+        
         while self._running:
             try:
-                # Wait for next item
-                file_path = await self.queue.get()
-                await self._process_file(file_path)
-                self.queue.task_done()
+                # Wait for items with a timeout to flush buffer if it doesn't fill up
+                try:
+                    # If buffer is empty, wait indefinitely for the first item
+                    # If buffer has items, wait specifically for debounce/timeout
+                    timeout = None if not buffer else settings.DEBOUNCE_SECONDS
+                    
+                    file_path = await asyncio.wait_for(self.queue.get(), timeout=timeout)
+                    buffer.append(file_path)
+                    self.queue.task_done()
+                except asyncio.TimeoutError:
+                    # Timeout reached, flush buffer if we have items
+                    pass
+                
+                # Check conditions to process batch
+                if len(buffer) >= settings.BATCH_SIZE or (not self.queue.empty() and len(buffer) > 0) or (buffer and not self.queue.qsize()):
+                     # Simple logic: If we have items and (hit batch size OR timed out), process.
+                     # The wait_for handles the timeout case.
+                     if buffer:
+                         await self._process_batch(list(buffer)) # Pass a copy
+                         buffer.clear()
+                         
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in indexer loop: {e}")
+        
+        # Process remaining items on stop
+        if buffer:
+            await self._process_batch(buffer)
 
     async def stop(self):
         """Stops the consumer loop."""
         self._running = False
-        # Optional: wait for queue to empty? for now just stop.
 
     async def enqueue_file(self, file_path: Path):
         """Adds a file path to the processing queue."""
         await self.queue.put(file_path)
 
-    async def _process_file(self, file_path: Path):
-        """Reads file, embeds content, and updates DB."""
-        if not file_path.exists():
-             logger.info(f"File deleted: {file_path}, removing from DB.") 
-             self._remove_from_db(file_path)
-             return
-
-        # Simple text extraction for now
+    def _extract_text(self, file_path: Path) -> str:
+        """Extracts text from file based on extension."""
         try:
-            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            if file_path.suffix.lower() == ".pdf":
+                reader = PdfReader(str(file_path))
+                text = ""
+                for page in reader.pages:
+                    text += page.extract_text() + "\n"
+                return text
+            else:
+                # Default text handling
+                return file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            logger.warning(f"Could not extract text from {file_path}: {e}")
+            return ""
+
+    async def _process_batch(self, file_paths: List[Path]):
+        """Reads files, embeds content, and updates DB in batch."""
+        if not file_paths:
+            return
+
+        loop = asyncio.get_running_loop()
+        if self.model is None:
+            await loop.run_in_executor(None, self._load_model)
+
+        ids = []
+        documents = []
+        metadatas = []
+        valid_indices = [] # To keep track of which files we actually processed successfully
+
+        # 1. Extraction Phase
+        for i, file_path in enumerate(file_paths):
+            if not file_path.exists():
+                logger.info(f"File deleted: {file_path}, removing from DB.") 
+                self._remove_from_db(file_path)
+                continue
+
+            content = self._extract_text(file_path)
+            
             if not content.strip():
-                return
-            
-            # Identify file in a stable way
-            file_id = str(file_path.absolute())
-            
-            # Metadata
-            metadata = {
+                continue
+
+            ids.append(str(file_path.absolute()))
+            documents.append(content)
+            metadatas.append({
                 "filename": file_path.name,
                 "path": str(file_path.absolute()),
                 "extension": file_path.suffix,
                 "size": file_path.stat().st_size
-            }
+            })
+            valid_indices.append(i)
 
-            # Run embedding in a thread executor to avoid blocking the event loop
-            loop = asyncio.get_running_loop()
-            
-            if self.model is None:
-                await loop.run_in_executor(None, self._load_model)
+        if not ids:
+            return
 
-            embeddings = await loop.run_in_executor(None, self.model.encode, content)
+        # 2. Embedding Phase (Batch)
+        try:
+            logger.info(f"Embedding batch of {len(ids)} files...")
+            embeddings = await loop.run_in_executor(None, self.model.encode, documents)
             
-            # Upsert to Chroma
-            logger.info(f"Indexing: {file_path}")
+            # 3. Upsert Phase
             self.collection.upsert(
-                ids=[file_id],
-                embeddings=[embeddings.tolist()],
-                documents=[content],
-                metadatas=[metadata]
+                ids=ids,
+                embeddings=embeddings.tolist(),
+                documents=documents,
+                metadatas=metadatas
             )
-
+            logger.info(f"Batch upsert complete. ({len(ids)} items)")
+            
         except Exception as e:
-            logger.error(f"Failed to process {file_path}: {e}")
+            logger.error(f"Batch processing failed: {e}")
 
     def _remove_from_db(self, file_path: Path):
         try:

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
   
   # File Watching
   WATCH_DIRECTORIES: List[str] = [str(Path.home() / "Documents")] # Default, can be overridden env var
-  SUPPORTED_EXTENSIONS: List[str] = [".md", ".txt", ".py"]
+  SUPPORTED_EXTENSIONS: List[str] = [".md", ".txt", ".py", ".pdf"]
   IGNORE_DIRS: List[str] = [".git", "__pycache__", "node_modules", "venv", ".env"]
 
   # AI Model
