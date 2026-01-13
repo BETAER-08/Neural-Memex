@@ -14,10 +14,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("indexer")
 
 class AsyncIndexer:
-    def __init__(self):
+    def __init__(self, model: Optional[SentenceTransformer] = None):
         self.queue = asyncio.Queue()
         self.collection: Collection = db_client.get_collection()
-        self.model: Optional[SentenceTransformer] = None
+        self.model: Optional[SentenceTransformer] = model
         self._running = False
 
     def _load_model(self):

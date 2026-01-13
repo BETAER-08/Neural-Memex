@@ -1,24 +1,19 @@
-import asyncio
-import logging
 import signal
 import sys
+import subprocess
 from typing import Annotated
 
 import typer
+import httpx
+import uvicorn
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.style import Style
 from rich import print as rprint
-from sentence_transformers import SentenceTransformer
-
-from src.core.config import settings
-from src.db.db_client import db_client
-from src.services.indexer import AsyncIndexer
-from src.services.watcher import DirectoryWatcher
 
 app = typer.Typer(
-    help="Neural-Memex: Local Semantic File System Daemon",
+    help="Neural-Memex: Local Semantic File System Daemon (Client)",
     add_completion=False,
     no_args_is_help=True
 )
@@ -31,72 +26,39 @@ STYLE_ROW_EVEN = Style(color="black")
 STYLE_ROW_ODD = Style(color="dim")
 
 
-async def _run_daemon():
-    """Async entry point for the daemon."""
-    indexer = AsyncIndexer()
-    watcher = DirectoryWatcher(indexer)
-
-    # Start services
-    watcher.start()
-    indexer_task = asyncio.create_task(indexer.start())
-    
-    # Graceful shutdown handler
-    stop_event = asyncio.Event()
-
-    def handle_signal():
-        stop_event.set()
-
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGINT, handle_signal)
-    loop.add_signal_handler(signal.SIGTERM, handle_signal)
-
-    rprint(Panel(
-        f"[bold blue]Neural-Memex Daemon[/bold blue]\n"
-        f"Watching: {settings.WATCH_DIRECTORIES}\n"
-        f"DB Path: {settings.DB_PATH}",
-        title="System Online",
-        border_style="bold red"
-    ))
-
-    # Wait for stop signal
-    await stop_event.wait()
-    
-    rprint("[bold yellow]Shutting down...[/bold yellow]")
-    watcher.stop()
-    await indexer.stop()
-    indexer_task.cancel()
-    try:
-        await indexer_task
-    except asyncio.CancelledError:
-        pass
-
-
 @app.command()
 def start():
-    """Starts the background monitoring daemon."""
-    try:
-        asyncio.run(_run_daemon())
-    except KeyboardInterrupt:
-        pass
+    """Starts the background monitoring daemon (FastAPI Server)."""
+    rprint(Panel(
+        f"[bold blue]Starting Neural-Memex Daemon...[/bold blue]\n"
+        f"Server: http://127.0.0.1:8000",
+        title="System Startup",
+        border_style="bold red"
+    ))
+    # We run uvicorn directly. 
+    # In a real 'daemon' mode this might detach, but for now we block.
+    uvicorn.run("src.server:app", host="127.0.0.1", port=8000, reload=False)
 
 
 @app.command()
 def search(query: str):
-    """Semantically search your files."""
+    """Semantically search your files via the running Daemon."""
     
-    # Load model just for search (could be optimized to use a running server, but this is simple)
-    with console.status("[bold yellow]Loading Neural Engine...[/bold yellow]"):
-        model = SentenceTransformer(settings.MODEL_NAME)
-        embedding = model.encode(query).tolist()
-        
-    collection = db_client.get_collection()
+    DAEMON_URL = "http://127.0.0.1:8000/search"
     
-    results = collection.query(
-        query_embeddings=[embedding],
-        n_results=10,
-        include=["metadatas", "distances", "documents"]
-    )
-    
+    with console.status("[bold yellow]Querying Neural Engine...[/bold yellow]"):
+        try:
+            response = httpx.post(DAEMON_URL, json={"query": query}, timeout=10.0)
+            response.raise_for_status()
+            results = response.json()
+        except httpx.ConnectError:
+            rprint("[bold red]Error:[/bold red] Could not connect to Neural-Memex Daemon.")
+            rprint("Please run [green]memex start[/green] in another terminal.")
+            raise typer.Exit(code=1)
+        except Exception as e:
+            rprint(f"[bold red]Error:[/bold red] Request failed: {e}")
+            raise typer.Exit(code=1)
+
     table = Table(
         title=f"Search Results: '{query}'",
         show_header=True,
@@ -110,15 +72,10 @@ def search(query: str):
     table.add_column("Path", style="dim")
     
     count = 0
-    if results["ids"]:
-        for i in range(len(results["ids"][0])):
-            distance = results["distances"][0][i]
-            metadata = results["metadatas"][0][i]
-            
-            # Simple similarity score conversion (distance is likely l2 or cosine distance)
-            score = f"{1 - distance:.3f}" 
-            
-            table.add_row(score, metadata["filename"], metadata["path"])
+    if results:
+        for item in results:
+            score = f"{item['score']:.3f}"
+            table.add_row(score, item["filename"], item["path"])
             count += 1
 
     if count == 0:
