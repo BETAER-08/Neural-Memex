@@ -1,0 +1,16 @@
+[Unit]
+Description=Neural-Memex: Local Semantic File System Daemon
+After=network.target
+
+[Service]
+Type=simple
+# Assumes installation in a virtualenv or specific python path. 
+# User must adjust ExecStart to point to their python executable and the src/cli.py path.
+# Example: ExecStart=/path/to/venv/bin/python /path/to/project/src/cli.py start
+ExecStart=%h/project/Neural-Memex/.venv/bin/python %h/project/Neural-Memex/src/cli.py start
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
