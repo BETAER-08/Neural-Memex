@@ -45,7 +45,7 @@ def start():
     ))
     # We run uvicorn directly. 
     # In a real 'daemon' mode this might detach, but for now we block.
-    uvicorn.run("src.server:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("src.server:app", host="127.0.0.1", port=8000, reload=False, loop="asyncio")
 
 
 @app.command()
@@ -195,6 +195,36 @@ def inspire():
         rprint(f"[bold red]Error:[/bold red] Failed to recall memory: {e}")
         raise typer.Exit(code=1)
 
+
+@app.command()
+def sync():
+    """Backup your Neural-Journal to GitHub."""
+    if not JOURNAL_DIR.exists():
+         rprint(Panel("No journal directory found to sync.", border_style="bold red"))
+         raise typer.Exit(code=1)
+
+    try:
+        # Check if it is a git repo
+        if not (JOURNAL_DIR / ".git").exists():
+             rprint("[bold yellow]Initializing Git Repository...[/bold yellow]")
+             subprocess.run(["git", "init"], cwd=JOURNAL_DIR, check=True)
+
+        with console.status("[bold green]Syncing to Neural-Cloud (GitHub)...[/bold green]"):
+            subprocess.run(["git", "add", "."], cwd=JOURNAL_DIR, check=True)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            subprocess.run(["git", "commit", "-m", f"Neural-Memex Sync: {timestamp}"], cwd=JOURNAL_DIR, check=False) # check=False in case of no changes
+            # Note: This assumes 'origin' remote is configured.
+            subprocess.run(["git", "push", "origin", "main"], cwd=JOURNAL_DIR, check=False) 
+            
+        rprint(Panel(
+            f"Synced at {timestamp}",
+            title="[bold green]Neural-Sync Complete[/bold green]",
+            border_style="bold green"
+        ))
+
+    except Exception as e:
+        rprint(f"[bold red]Error:[/bold red] Sync failed: {e}")
+        raise typer.Exit(code=1)
 
 @app.command()
 def status():
