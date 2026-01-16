@@ -1,6 +1,8 @@
 import signal
 import sys
 import subprocess
+import random
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, List
@@ -8,6 +10,7 @@ from typing import Annotated, List
 import typer
 import httpx
 import uvicorn
+from rich import box
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -149,6 +152,86 @@ def read_today():
     except Exception as e:
         rprint(f"[bold red]Error:[/bold red] Failed to read journal entry: {e}")
         raise typer.Exit(code=1)
+
+
+@app.command()
+def inspire():
+    """Serendipity: Rediscover a random memory from your Neural-Journal."""
+    if not JOURNAL_DIR.exists():
+        rprint(Panel(
+            "[bold red]No memories recorded yet.[/bold red]\n"
+            "Start your journey with [bold]memex log[/bold].",
+            title="Neural Empty",
+            border_style="bold red"
+        ))
+        return
+
+    # Get all .md files
+    files = list(JOURNAL_DIR.glob("*.md"))
+    
+    if not files:
+        rprint(Panel(
+            "[bold red]No memories recorded yet.[/bold red]\n"
+            "Start your journey with [bold]memex log[/bold].",
+            title="Neural Empty",
+            border_style="bold red"
+        ))
+        return
+
+    # Randomly select one
+    random_file = random.choice(files)
+    
+    try:
+        with open(random_file, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        md = Markdown(content)
+        rprint(Panel(
+            md,
+            title=f"[bold magenta]✨ Random Memory: {random_file.name}[/bold magenta]",
+            border_style="bold magenta"
+        ))
+    except Exception as e:
+        rprint(f"[bold red]Error:[/bold red] Failed to recall memory: {e}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def status():
+    """System Dashboard: Monitor Neural-Memex health and knowledge stats."""
+    
+    # Health Check
+    try:
+        response = httpx.get("http://127.0.0.1:8000/health", timeout=2.0)
+        is_online = response.status_code == 200
+    except:
+        is_online = False
+
+    status_str = "[bold green]🟢 Online[/bold green]" if is_online else "[bold red]🔴 Offline[/bold red]"
+
+    # Stats Calculation
+    total_memories = 0
+    total_size_kb = 0.0
+
+    if JOURNAL_DIR.exists():
+        files = list(JOURNAL_DIR.glob("*.md"))
+        total_memories = len(files)
+        total_size_bytes = sum(f.stat().st_size for f in files)
+        total_size_kb = total_size_bytes / 1024
+
+    # UI Construction
+    table = Table(
+        show_header=False,
+        box=box.SIMPLE,
+        border_style=STYLE_BORDER
+    )
+    
+    table.add_row("System Status", status_str)
+    table.add_row("Total Memories", f"[bold cyan]{total_memories}[/bold cyan]")
+    table.add_row("Knowledge Size", f"[bold yellow]{total_size_kb:.1f} KB[/bold yellow]")
+
+    console.print(table)
+    console.print("[dim]Tip: Run 'memex sync' to backup[/dim]")
 
 
 if __name__ == "__main__":
